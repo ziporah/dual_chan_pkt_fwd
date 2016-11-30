@@ -7,8 +7,11 @@
  * which accompanies this distribution, and is available at
  * http://www.eclipse.org/legal/epl-v10.html
  *
+ * HBM:
  * Changes for creating a dual channel gateway with the Raspberry Pi+ LoRa(TM) Expansion Board
  * of Uputronics, see also: store.uputronics.com/index.php?route=product/product&product_id=68
+ * It now also supports downlink, config file, separate thread for downlink and separate functions
+ * in the LoraModem.c file
  *******************************************************************************/
 
 // Raspberry PI pin mapping
@@ -57,6 +60,7 @@
 
 
 #include "base64.h"
+#include "parson.h"
 
 #include <rapidjson/document.h>
 #include <rapidjson/filereadstream.h>
@@ -81,6 +85,12 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <pthread.h>
+#include <netdb.h>              // gai_strerror 
+#include "LoraModem.h"		// include Lora stuff
+
+// Debug messages
+//int debug = 2;
 
 static const int CHANNEL = 0;
 
@@ -90,41 +100,42 @@ using namespace rapidjson;
 
 #define BASE64_MAX_LENGTH 341
 
-static const int SPI_CHANNEL = 0;
-static const int SPI_CHANNEL_2 = 1;
+//static const int SPI_CHANNEL = 0;
+//static const int SPI_CHANNEL_2 = 1;
 
-bool sx1272 = true;
+//bool sx1272 = true;
 typedef unsigned char byte;
 
-struct sockaddr_in si_other;
-int s;
-int slen = sizeof(si_other);
-struct ifreq ifr;
+//struct sockaddr_in si_other;
+//int s;
+//int slen = sizeof(si_other);
+//struct ifreq ifr;
 
-uint32_t cp_nb_rx_rcv;
-uint32_t cp_nb_rx_ok;
-uint32_t cp_nb_rx_ok_tot;
-uint32_t cp_nb_rx_bad;
-uint32_t cp_nb_rx_nocrc;
-uint32_t cp_up_pkt_fwd;
+//uint32_t cp_nb_rx_rcv;
+//uint32_t cp_nb_rx_ok;
+//uint32_t cp_nb_rx_ok_tot;
+//uint32_t cp_nb_rx_bad;
+//uint32_t cp_nb_rx_nocrc;
+//uint32_t cp_up_pkt_fwd;
+uint32_t cp_nb_pull;
 
-typedef enum SpreadingFactors
-{
-    SF7 = 7,
-    SF8,
-    SF9,
-    SF10,
-    SF11,
-    SF12
-} SpreadingFactor_t;
+//typedef enum SpreadingFactors
+//{
+//    SF7 = 7,
+//    SF8,
+//    SF9,
+//    SF10,
+//    SF11,
+//    SF12
+//} SpreadingFactor_t;
 
-typedef struct Server
-{
-    string address;
-    uint16_t port;
-    bool enabled;
-} Server_t;
-
+//typedef struct Server
+//{
+//    string address;
+//    uint16_t port;
+//    bool enabled;
+//} Server_t;
+//
 /*******************************************************************************
  *
  * Default values, configure them in global_conf.json
@@ -133,16 +144,16 @@ typedef struct Server
 
 // uputronics - Raspberry connections
 // Put them in global_conf.json
-int ssPin = 0xff;
-int dio0  = 0xff;
-int ssPin_2 = 0xff;
-int dio0_2  = 0xff;
-int RST   = 0xff;
-int Led1  = 0xff;
-int NetworkLED    = 22;
-int InternetLED   = 23;
-int ActivityLED_0 = 21;
-int ActivityLED_1 = 29; 
+//int ssPin = 0xff;
+//int dio0  = 0xff;
+//int ssPin_2 = 0xff;
+//int dio0_2  = 0xff;
+//int RST   = 0xff;
+//int Led1  = 0xff;
+//int NetworkLED    = 22;
+//int InternetLED   = 23;
+//int ActivityLED_0 = 21;
+//int ActivityLED_1 = 29; 
 
 // Set location in global_conf.json
 float lat =  0.0;
@@ -156,17 +167,21 @@ char description[64] ; /* used for free form description */
 
 // Set spreading factor (SF7 - SF12), &nd  center frequency
 // Overwritten by the ones set in global_conf.json
-SpreadingFactor_t sf = SF7;
-uint16_t bw = 125;
-uint32_t freq = 868100000; // in Mhz! (868.1)
-uint32_t freq_2 = 868300000; // in Mhz! (868.3)
+//SpreadingFactor_t sf = SF7;
+//uint16_t bw = 125;
 
 // Servers
-vector<Server_t> servers;
+//vector<Server_t> servers;
 
 // internet interface
 char interface[6];     // Used to set the interface to communicate to the internet either eth0 or wlan0
 
+static int keepalive_time = DEFAULT_KEEPALIVE; // send a PULL_DATA request every X seconds
+/* network protocol variables */
+//static struct timeval push_timeout_half = {0, (PUSH_TIMEOUT_MS * 500)}; /* cut in half, critical for throughput */
+static struct timeval pull_timeout = {0, (PULL_TIMEOUT_MS * 1000)}; /* non critical for throughput */
+
+/* Moved to LoraModem.h check if this can be deleted later
 // #############################################
 // #############################################
 
@@ -238,9 +253,30 @@ char interface[6];     // Used to set the interface to communicate to the intern
 
 #define PKT_PULL_RESP 3
 #define PKT_PULL_ACK  4
+*/
 
 #define TX_BUFF_SIZE    2048
 #define STATUS_SIZE     1024
+
+//Downlink stuff
+#define MAX_SERVERS                 4 /* Support up to 4 servers, more does not seem realistic */
+#define RX_BUFF_SIZE  1024	// Downstream received from MQTT
+uint8_t buff_down[RX_BUFF_SIZE];	// Buffer for downstream
+uint8_t buff_up[RX_BUFF_SIZE];	// Buffer for upstream
+/* network sockets */
+//static int sock_up[MAX_SERVERS]; /* sockets for upstream traffic */
+static int sock_down[MAX_SERVERS]; /* sockets for downstream traffic */
+pthread_t thrid_down[MAX_SERVERS];
+
+void thread_down(void* pic);
+
+/* gateway <-> MAC protocol variables */
+//static uint32_t net_mac_h; /* Most Significant Nibble, network order */
+//static uint32_t net_mac_l; /* Least Significant Nibble, network order */
+/* signal handling variables */
+volatile bool exit_sig = false; /* 1 -> application terminates cleanly (shut down hardware, close open files, etc) */
+volatile bool quit_sig = false; /* 1 -> application terminates without shutting down the hardware */
+
 
 void LoadConfiguration(string filename);
 void PrintConfiguration();
@@ -251,90 +287,14 @@ void Die(const char *s)
   exit(1);
 }
 
-void SelectReceiver(byte CE)
-{
-   if (CE == 0)
-   {
-     digitalWrite(ssPin, LOW);
-   } else {
-     digitalWrite(ssPin_2, LOW);
-   }
-}  
+//char * PinName(int pin, char * buff) {
+//  strcpy(buff, "unused");
+//  if (pin != 0xff) {
+//    sprintf(buff, "%d", pin);
+//  }
+//  return buff;
+//}
 
-void UnselectReceiver(byte CE)
-{
-    if (CE == 0)
-    {
-      digitalWrite(ssPin, HIGH);
-    } else {
-      digitalWrite(ssPin_2, HIGH);
-    }   
-}
-
-uint8_t ReadRegister(uint8_t addr, byte CE)
-{
-    uint8_t spibuf[2];
-
-    SelectReceiver(CE);
-    spibuf[0] = addr & 0x7F;
-    spibuf[1] = 0x00;
-    wiringPiSPIDataRW(CE, spibuf, 2);
-    UnselectReceiver(CE);
-
-    return spibuf[1];
-}
-
-void WriteRegister(uint8_t addr, uint8_t value, byte CE)
-{
-    uint8_t spibuf[2];
-                           
-    SelectReceiver(CE);
-    spibuf[0] = addr | 0x80;
-    spibuf[1] = value;
-    wiringPiSPIDataRW(CE, spibuf, 2);
-
-    UnselectReceiver(CE);    
-}
-
-bool ReceivePkt(char* payload, uint8_t* p_length, byte CE)
-{
-  // clear rxDone
-  WriteRegister(REG_IRQ_FLAGS, 0x40, CE);
-
-  int irqflags = ReadRegister(REG_IRQ_FLAGS, CE);
-
-  cp_nb_rx_rcv++;
-
-  //  payload crc: 0x20
-  if((irqflags & 0x20) == 0x20) {
-    printf("CRC error\n");
-    WriteRegister(REG_IRQ_FLAGS, 0x20, CE);
-    return false;
-
-  } else {
-    cp_nb_rx_ok++;
-    cp_nb_rx_ok_tot++;
-
-    uint8_t currentAddr = ReadRegister(REG_FIFO_RX_CURRENT_ADDR, CE);
-    uint8_t receivedCount = ReadRegister(REG_RX_NB_BYTES, CE);
-    *p_length = receivedCount;
-
-    WriteRegister(REG_FIFO_ADDR_PTR, currentAddr, CE);
-
-    for(int i = 0; i < receivedCount; i++) {
-      payload[i] = ReadRegister(REG_FIFO, CE);
-    }
-  }
-  return true;
-}
-
-char * PinName(int pin, char * buff) {
-  strcpy(buff, "unused");
-  if (pin != 0xff) {
-    sprintf(buff, "%d", pin);
-  }
-  return buff;
-}
 
 void SetupLoRa(byte CE)
 {
@@ -401,9 +361,9 @@ void SetupLoRa(byte CE)
 
   if (sx1272) {
     if (sf == SF11 || sf == SF12) {
-      WriteRegister(REG_MODEM_CONFIG, 0x0B, CE);
+      WriteRegister(REG_MODEM_CONFIG1, 0x0B, CE);
     } else {
-      WriteRegister(REG_MODEM_CONFIG, 0x0A, CE);
+      WriteRegister(REG_MODEM_CONFIG1, 0x0A, CE);
     }
     WriteRegister(REG_MODEM_CONFIG2, (sf << 4) | 0x04, CE);
   } else {
@@ -412,7 +372,7 @@ void SetupLoRa(byte CE)
     } else {
       WriteRegister(REG_MODEM_CONFIG3, 0x04, CE);
     }
-    WriteRegister(REG_MODEM_CONFIG, 0x72, CE);
+    WriteRegister(REG_MODEM_CONFIG1, 0x72, CE);
     WriteRegister(REG_MODEM_CONFIG2, (sf << 4) | 0x04, CE);
   }
 
@@ -431,49 +391,49 @@ void SetupLoRa(byte CE)
   WriteRegister(REG_OPMODE, SX72_MODE_RX_CONTINUOS, CE);
 }
 
-void SolveHostname(const char* p_hostname, uint16_t port, struct sockaddr_in* p_sin)
-{
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(struct addrinfo));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_DGRAM;
-  hints.ai_protocol = IPPROTO_UDP;
+//void SolveHostname(const char* p_hostname, uint16_t port, struct sockaddr_in* p_sin)
+//{
+ // struct addrinfo hints;
+  //memset(&hints, 0, sizeof(struct addrinfo));
+//  hints.ai_family = AF_INET;
+//  hints.ai_socktype = SOCK_DGRAM;
+//  hints.ai_protocol = IPPROTO_UDP;
+//
+//  char service[6] = { '\0' };
+//  snprintf(service, 6, "%hu", port);
+//
+//  struct addrinfo* p_result = NULL;
+//
+//  // Resolve the domain name into a list of addresses
+//  int error = getaddrinfo(p_hostname, service, &hints, &p_result);
+//  if (error != 0) {
+//      fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(error));
+//      exit(EXIT_FAILURE);
+//  }
+//
+//  // Loop over all returned results
+//  for (struct addrinfo* p_rp = p_result; p_rp != NULL; p_rp = p_rp->ai_next) {
+//    struct sockaddr_in* p_saddr = (struct sockaddr_in*)p_rp->ai_addr;
+//    //printf("%s solved to %s\n", p_hostname, inet_ntoa(p_saddr->sin_addr));
+//    p_sin->sin_addr = p_saddr->sin_addr;
+//  }
+//
+//  freeaddrinfo(p_result);
+//}
 
-  char service[6] = { '\0' };
-  snprintf(service, 6, "%hu", port);
-
-  struct addrinfo* p_result = NULL;
-
-  // Resolve the domain name into a list of addresses
-  int error = getaddrinfo(p_hostname, service, &hints, &p_result);
-  if (error != 0) {
-      fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(error));
-      exit(EXIT_FAILURE);
-  }
-
-  // Loop over all returned results
-  for (struct addrinfo* p_rp = p_result; p_rp != NULL; p_rp = p_rp->ai_next) {
-    struct sockaddr_in* p_saddr = (struct sockaddr_in*)p_rp->ai_addr;
-    //printf("%s solved to %s\n", p_hostname, inet_ntoa(p_saddr->sin_addr));
-    p_sin->sin_addr = p_saddr->sin_addr;
-  }
-
-  freeaddrinfo(p_result);
-}
-
-void SendUdp(char *msg, int length)
-{
-  for (vector<Server_t>::iterator it = servers.begin(); it != servers.end(); ++it) {
-    if (it->enabled) {
-      si_other.sin_port = htons(it->port);
-
-      SolveHostname(it->address.c_str(), it->port, &si_other);
-      if (sendto(s, (char *)msg, length, 0 , (struct sockaddr *) &si_other, slen)==-1) {
-        Die("sendto()");
-      }
-    }
-  }
-}
+//void SendUdp(char *msg, int length)
+//{
+ // for (vector<Server_t>::iterator it = servers.begin(); it != servers.end(); ++it) {
+  //  if (it->enabled) {
+   //   si_other.sin_port = htons(it->port);
+//
+ //     SolveHostname(it->address.c_str(), it->port, &si_other);
+  //    if (sendto(s, (char *)msg, length, 0 , (struct sockaddr *) &si_other, slen)==-1) {
+   //     Die("sendto()");
+    //  }
+    //}
+  //}
+//}
 
 void SendStat()
 {
@@ -548,161 +508,13 @@ void SendStat()
   if (cp_nb_rx_ok_tot==0) {
     printf(" no packet received yet\n");
   } else {
-    printf(" %u packet%sreceived\n", cp_nb_rx_ok_tot, cp_nb_rx_ok_tot>1?"s ":" ");
+    printf(" %u packet%sreceived, %u packet%ssent...\n", cp_nb_rx_ok_tot, cp_nb_rx_ok_tot>1?"s ":" ", cp_nb_pull, cp_nb_pull>1?"s ":" ");
   }
 
   // Build and send message.
   memcpy(status_report + 12, json.c_str(), json.size());
   SendUdp(status_report, stat_index + json.size());
   digitalWrite(InternetLED, LOW);
-}
-
-bool Receivepacket(byte CE)
-{
-  long int SNR;
-  int rssicorr, dio_port;
-  bool ret = false;
-
-  if (CE == 0)
-    {
-        dio_port = dio0;
-    } else {
-        dio_port = dio0_2;
-    }  
-
-  if (digitalRead(dio_port) == 1) {
-    char message[256];
-    uint8_t length = 0;
-    if (ReceivePkt(message, &length, CE)) {
-      // OK got one
-      ret = true;
-
-      uint8_t value = ReadRegister(REG_PKT_SNR_VALUE, CE);
-
-      if (CE == 0)
-            {
-              digitalWrite(ActivityLED_0, HIGH);
-            } else {
-              digitalWrite(ActivityLED_1, HIGH);
-           }  
-
-      if (value & 0x80) { // The SNR sign bit is 1
-        // Invert and divide by 4
-        value = ((~value + 1) & 0xFF) >> 2;
-        SNR = -value;
-      } else {
-        // Divide by 4
-        SNR = ( value & 0xFF ) >> 2;
-      }
-
-      rssicorr = sx1272 ? 139 : 157;
-
-      printf("CE%i Packet RSSI: %d, ", CE, ReadRegister(0x1A, CE) - rssicorr);
-      printf("RSSI: %d, ", ReadRegister(0x1B,CE) - rssicorr);
-      printf("SNR: %li, ", SNR);
-      printf("Length: %hhu Message:'", length);
-      for (int i=0; i<length; i++) {
-        char c = (char) message[i];
-        printf("%c",isprint(c)?c:'.');
-      }
-      printf("'\n");
-
-      char buff_up[TX_BUFF_SIZE]; /* buffer to compose the upstream packet */
-      int buff_index = 0;
-
-      /* gateway <-> MAC protocol variables */
-      //static uint32_t net_mac_h; /* Most Significant Nibble, network order */
-      //static uint32_t net_mac_l; /* Least Significant Nibble, network order */
-
-      /* pre-fill the data buffer with fixed fields */
-      buff_up[0] = PROTOCOL_VERSION;
-      buff_up[3] = PKT_PUSH_DATA;
-
-      /* process some of the configuration variables */
-      //net_mac_h = htonl((uint32_t)(0xFFFFFFFF & (lgwm>>32)));
-      //net_mac_l = htonl((uint32_t)(0xFFFFFFFF &  lgwm  ));
-      //*(uint32_t *)(buff_up + 4) = net_mac_h; 
-      //*(uint32_t *)(buff_up + 8) = net_mac_l;
-
-      buff_up[4] = (uint8_t)ifr.ifr_hwaddr.sa_data[0];
-      buff_up[5] = (uint8_t)ifr.ifr_hwaddr.sa_data[1];
-      buff_up[6] = (uint8_t)ifr.ifr_hwaddr.sa_data[2]; 
-      buff_up[7] = 0xFF;
-      buff_up[8] = 0xFF;
-      buff_up[9] = (uint8_t)ifr.ifr_hwaddr.sa_data[3];
-      buff_up[10] = (uint8_t)ifr.ifr_hwaddr.sa_data[4];
-      buff_up[11] = (uint8_t)ifr.ifr_hwaddr.sa_data[5];
-
-      /* start composing datagram with the header */
-      uint8_t token_h = (uint8_t)rand(); /* random token */
-      uint8_t token_l = (uint8_t)rand(); /* random token */
-      buff_up[1] = token_h;
-      buff_up[2] = token_l;
-      buff_index = 12; /* 12-byte header */
-
-      // TODO: tmst can jump is time is (re)set, not good.
-      struct timeval now;
-      gettimeofday(&now, NULL);
-      uint32_t tmst = (uint32_t)(now.tv_sec * 1000000 + now.tv_usec);
-
-      // Encode payload.
-      char b64[BASE64_MAX_LENGTH];
-      bin_to_b64((uint8_t*)message, length, b64, BASE64_MAX_LENGTH);
-
-      // Build JSON object.
-      StringBuffer sb;
-      Writer<StringBuffer> writer(sb);
-      writer.StartObject();
-      writer.String("rxpk");
-      writer.StartArray();
-      writer.StartObject();
-      writer.String("tmst");
-      writer.Uint(tmst);
-      writer.String("freq");
-      if (CE == 0) {
-        writer.Double((double)freq / 1000000);
-        writer.String("chan");
-        writer.Uint(0);
-      } else {
-        writer.Double((double)freq_2 / 1000000);
-        writer.String("chan");
-        writer.Uint(1);
-      }
-      writer.String("rfch");
-      writer.Uint(0);
-      writer.String("stat");
-      writer.Uint(1);
-      writer.String("modu");
-      writer.String("LORA");
-      writer.String("datr");
-      char datr[] = "SFxxBWxxx";
-      snprintf(datr, strlen(datr) + 1, "SF%hhuBW%hu", sf, bw);
-      writer.String(datr);
-      writer.String("codr");
-      writer.String("4/5");
-      writer.String("rssi");
-      writer.Int(ReadRegister(0x1A, CE) - rssicorr);
-      writer.String("lsnr");
-      writer.Double(SNR); // %li.
-      writer.String("size");
-      writer.Uint(length);
-      writer.String("data");
-      writer.String(b64);
-      writer.EndObject();
-      writer.EndArray();
-      writer.EndObject();
-
-      string json = sb.GetString();
-      printf("rxpk update: %s\n", json.c_str());
-
-      // Build and send message.
-      memcpy(buff_up + 12, json.c_str(), json.size());
-      SendUdp(buff_up, buff_index + json.size());
-
-      fflush(stdout);
-    }
-  }
-  return ret;
 }
 
 int main()
@@ -735,15 +547,17 @@ int main()
   delay(100);
   digitalWrite(RST, LOW);
   delay(100);   
-  SetupLoRa(0);
-  SetupLoRa(1);
+initLoraModem(0);
+initLoraModem(1);
+  //SetupLoRa(0);
+  //SetupLoRa(1);
 
   // Prepare Socket connection
   while ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
      digitalWrite(NetworkLED, 1);
      printf("No socket connection possible yet. Retrying in 10 seconds...\n");
      delay(10000);
-     digitalWrite(NetworkLED, 0);
+    digitalWrite(NetworkLED, 0);
   }
 
   memset((char *) &si_other, 0, sizeof(si_other));
@@ -766,11 +580,113 @@ int main()
   printf("Listening at SF%i on %.6lf Mhz.\n", sf,(double)freq/1000000);
   printf("Listening at SF%i on %.6lf Mhz.\n", sf,(double)freq_2/1000000);
   printf("-----------------------------------\n");
+  
+  // Setup connectivity with the server
+
+  int i;
+  int ic=0;
+
+	/* network socket creation */
+	struct addrinfo hints;
+	struct addrinfo *result; /* store result of getaddrinfo */
+	struct addrinfo *q; /* pointer to move into *result data */
+	char host_name[64];
+	char port_name[64];
+	/* prepare hints to open network sockets */
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC; /* should handle IP v4 or v6 automatically */
+	hints.ai_socktype = SOCK_DGRAM;
+
+  for (vector<Server_t>::iterator it = servers.begin(); it != servers.end(); ++it) {
+    if (it->enabled) {
+      si_other.sin_port = htons(it->port);
+
+      SolveHostname(it->address.c_str(), it->port, &si_other);
+
+
+		// TODO: setup upstream connection as done below, now we still use the old method
+               /* look for server address w/ upstream port */
+               // i = getaddrinfo(it->address.c_str(), "1700", &hints, &result);
+               // if (i != 0) {
+               //         printf("ERROR: [up] getaddrinfo on address %s (port %i) returned: %s\n", it->address.c_str(), it->port, gai_strerror(i));
+               // }
+
+
+                /* connect so we can send/receive packet with the server only */
+                //i = connect(sock_up[ic], (struct sockaddr *) &si_other, slen);
+                //i = connect(sock_up[ic], (const sockaddr*) "1700", slen);
+                //if (i != 0) {
+                //        printf("ERROR: [up] connect on address %s (port %i) returned: %s\n", it->address.c_str(), it->port, strerror(errno));
+               // }
+               // freeaddrinfo(result);
+
+                /* look for server address w/ downstream port TODO use port from global_conf.json*/
+                i = getaddrinfo(it->address.c_str(), "1700", &hints, &result);
+                if (i != 0) {
+                        printf("ERROR: [down] getaddrinfo on address %s (port %i) returned: %s\n", it->address.c_str(), it->port, gai_strerror(i));
+                }
+
+                /* try to open socket for downstream traffic */
+                for (q=result; q!=NULL; q=q->ai_next) {
+                        sock_down[ic] = socket(q->ai_family, q->ai_socktype,q->ai_protocol);
+                        if (sock_down[ic] == -1) continue; /* try next field */
+                        else break; /* success, get out of loop */
+                }
+                if (q == NULL) {
+                        printf("ERROR: [down] failed to open socket to any of server %s addresses (port %i)\n", it->address.c_str(), it->port);
+                        i = 1;
+                        for (q=result; q!=NULL; q=q->ai_next) {
+                                getnameinfo(q->ai_addr, q->ai_addrlen, host_name, sizeof host_name, port_name, sizeof port_name, NI_NUMERICHOST);
+                                printf("INFO: [down] result %i host:%s service:%s\n", i, host_name, port_name);
+                                ++i;
+                        }
+                }
+               /* connect so we can send/receive packet with the server only */
+                i = connect(sock_down[ic], q->ai_addr, q->ai_addrlen);
+                if (i != 0) {
+                        printf("ERROR: [down] connect address %s (port %i) returned: %s\n", it->address.c_str(), it->port, strerror(errno));
+                }
+                freeaddrinfo(result);
+
+                /* If we made it through to here, this server is live */
+                printf("INFO: Successfully contacted server %s (port %i) \n", it->address.c_str(), it->port);
+    }
+    ic++;
+}
+
+
+  // Thread preparation
+ //  pthread_t threads[1];
+  //  int rc;
+  //  long t;
+  //  t=0;
+  //    printf("In main: creating thread %ld\n", t);
+  //     rc = pthread_create(&threads[t], NULL, receiveUDPThread, (void *)t);
+  //     if (rc){
+  //        printf("ERROR; return code from pthread_create() is %d\n", rc);
+  //        exit(-1);
+  //     }
+ic=0;
+  for (vector<Server_t>::iterator it = servers.begin(); it != servers.end(); ++it) {
+    if (it->enabled) {
+      si_other.sin_port = htons(it->port);
+		{
+			i = pthread_create( &thrid_down[ic], NULL, (void * (*)(void *))thread_down, (void *) (long) ic);
+			if (i != 0) {
+				printf("ERROR: [main] impossible to create downstream thread\n");
+				exit(EXIT_FAILURE);
+			}
+		ic++;
+		}
+     }
+  }
+
+
 
   while(1) {
 
     // Packet received ?
-    if (Receivepacket(0)) {
+    if (ReceivePacket(0)) {
       // Led ON
       if (ActivityLED_0 != 0xff) {
         digitalWrite(ActivityLED_0, 1);
@@ -779,7 +695,7 @@ int main()
       // start our Led blink timer, LED as been lit in Receivepacket
       led0_timer=millis();
     }
-    if (Receivepacket(1)) {
+    if (ReceivePacket(1)) {
       // Led ON
       if (ActivityLED_1 != 0xff) {
         digitalWrite(ActivityLED_1, 1);
@@ -788,6 +704,15 @@ int main()
       // start our Led blink timer, LED as been lit in Receivepacket
       led1_timer=millis();
     }
+
+   // Receive UDP PUSH_ACK messages from server. (*2, par. 3.3)
+   // This is important since the TTN broker will return confirmation
+   // messages on UDP for every message sent by the gateway. So we have to consume them..
+   // As we do not know when the server will respond, we test in every loop.
+   //
+   //int received_bytes = recvfrom( handle, packet_data, sizeof(packet_data),0, (struct sockaddr*)&cliaddr, &len );
+
+   //start the thread
 
     gettimeofday(&nowtime, NULL);
     uint32_t nowseconds = (uint32_t)(nowtime.tv_sec);
@@ -954,4 +879,244 @@ void PrintConfiguration()
   printf("  Latitude=%.8f\n  Longitude=%.8f\n  Altitude=%d\n", lat,lon,alt);
   printf("  Interface: %s\n", interface);
 
+}
+/* -------------------------------------------------------------------------- */
+/* --- THREAD 2: POLLING SERVER AND EMITTING PACKETS ------------------------ */
+
+// TODO: factor this out and inspect the use of global variables. (Cause this is started for each server)
+
+void thread_down(void* pic) {
+ //TODO
+
+	int i; // loop variables 
+	int ic = (int) (long) pic;
+	//int lastTmst;
+	
+	/* configuration and metadata for an outbound packet */
+	//struct lgw_pkt_tx_s txpkt;
+	//bool sent_immediate = false; /* option to sent the packet immediately */
+	
+	/* local timekeeping variables */
+	struct timespec send_time; /* time of the pull request */
+	struct timespec recv_time; /* time of return from recv socket call */
+	
+	/* data buffers */
+	uint8_t buff_down[1000]; /* buffer to receive downstream packets */
+	uint8_t buff_req[12]; /* buffer to compose pull requests */
+	int msg_len;
+	
+	/* protocol variables */
+	uint8_t token_h; /* random token for acknowledgement matching */
+	uint8_t token_l; /* random token for acknowledgement matching */
+	bool req_ack = false; /* keep track of whether PULL_DATA was acknowledged or not */
+	
+	/* JSON parsing variables */
+	//JSON_Value *root_val = NULL;
+	//JSON_Object *txpk_obj = NULL;
+	//JSON_Value *val = NULL; /* needed to detect the absence of some fields */
+	//const char *str; /* pointer to sub-strings in the JSON data */
+	//short x0, x1;
+	//short x2, x3, x4;
+	//double x5, x6; 
+	
+	/* variables to send on UTC timestamp */
+	//struct tref local_ref; /* time reference used for UTC <-> timestamp conversion */
+	//struct tm utc_vector; /* for collecting the elements of the UTC time */
+	//struct timespec utc_tx; /* UTC time that needs to be converted to timestamp */
+	
+	/* auto-quit variable */
+	//uint32_t autoquit_cnt = 0; /* count the number of PULL_DATA sent since the latest PULL_ACK */
+
+  i=0;
+  char * servername;
+  for (vector<Server_t>::iterator it = servers.begin(); it != servers.end() && i<=ic; ++it) {
+    //printf("server: .address = %s; .port = %hu; .enable = %d\n", it->address.c_str(), it->port, it->enabled);
+    servername = (char *) it->address.c_str();
+    i++;
+  }
+	printf("INFO: [down] Thread activated for server %s\n",servername);
+
+	/* set downstream socket RX timeout */
+	i = setsockopt(sock_down[ic], SOL_SOCKET, SO_RCVTIMEO, (void *)&pull_timeout, sizeof pull_timeout);
+	if (i != 0) {
+		//TODO Should this failure bring the application down?
+	        printf("ERROR: [down] setsockopt for server %s returned %s\n", servername, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	
+	/* pre-fill the pull request buffer with fixed fields */
+	buff_req[0] = PROTOCOL_VERSION;
+	buff_req[3] = PKT_PULL_DATA;
+        buff_req[4] = (unsigned char)ifr.ifr_hwaddr.sa_data[0];
+  	buff_req[5] = (unsigned char)ifr.ifr_hwaddr.sa_data[1];
+  	buff_req[6] = (unsigned char)ifr.ifr_hwaddr.sa_data[2];
+  	buff_req[7] = 0xFF;
+  	buff_req[8] = 0xFF;
+ 	buff_req[9] = (unsigned char)ifr.ifr_hwaddr.sa_data[3];
+  	buff_req[10] = (unsigned char)ifr.ifr_hwaddr.sa_data[4];
+  	buff_req[11] = (unsigned char)ifr.ifr_hwaddr.sa_data[5];
+	
+	while (!exit_sig && !quit_sig) {
+		
+		/* TODO: auto-quit if the threshold is crossed */
+		//if ((autoquit_threshold > 0) && (autoquit_cnt >= autoquit_threshold)) {
+		//	exit_sig = true;
+		//	printf("INFO: [down] for server %s the last %u PULL_DATA were not ACKed, exiting application\n", serv_addr[ic], autoquit_threshold);
+		//	break;
+		//}
+		
+		/* generate random token for request */
+		token_h = (uint8_t)rand(); /* random token */
+		token_l = (uint8_t)rand(); /* random token */
+		buff_req[1] = token_h;
+		buff_req[2] = token_l;
+		
+		/* send PULL request and record time */
+		send(sock_down[ic], (void *)buff_req, sizeof buff_req, 0);
+		if (debug >= 2) { printf("INFO: [up] for server %s PULL_REQ send \n", servername ); }
+		clock_gettime(CLOCK_MONOTONIC, &send_time);
+		//pthread_mutex_lock(&mx_meas_dw);
+		//meas_dw_pull_sent += 1;
+		//pthread_mutex_unlock(&mx_meas_dw);
+		req_ack = false;
+		//autoquit_cnt++;
+		
+		/* listen to packets and process them until a new PULL request must be sent */
+		recv_time = send_time;
+		while ((int)difftimespec(recv_time, send_time) < keepalive_time) {
+			if (debug >= 2) { printf("Waiting for incoming server packets..\n"); }
+			/* try to receive a datagram */
+			msg_len = recv(sock_down[ic], (void *)buff_down, (sizeof buff_down)-1, 0);
+			clock_gettime(CLOCK_MONOTONIC, &recv_time);
+			
+			/* if no network message was received, got back to listening sock_down socket */
+			if (msg_len == -1) {
+				//printf("WARNING: [down] recv returned %s\n", strerror(errno)); /* too verbose */
+				continue;
+			}
+			
+			/* if the datagram does not respect protocol, just ignore it */
+			if ((msg_len < 4) || (buff_down[0] != PROTOCOL_VERSION) || ((buff_down[3] != PKT_PULL_RESP) && (buff_down[3] != PKT_PULL_ACK))) {
+				//TODO Investigate why this message is logged only at shutdown, i.e. all messages produced here are collected and
+				//     spit out at program termination. This can lead to an unstable application.
+				printf("WARNING: [down] ignoring invalid packet\n");
+				continue;
+			}
+			
+			/* if the datagram is an ACK, check token */
+			if (buff_down[3] == PKT_PULL_ACK) {
+				if ((buff_down[1] == token_h) && (buff_down[2] == token_l)) {
+					if (req_ack) {
+						if (debug >=2) { printf("INFO: [down] for server %s duplicate ACK received :)\n",servername); }
+					} else { /* if that packet was not already acknowledged */
+						req_ack = true;
+						//autoquit_cnt = 0;
+						//pthread_mutex_lock(&mx_meas_dw);
+						//meas_dw_ack_rcv += 1;
+						//pthread_mutex_unlock(&mx_meas_dw);
+						if (debug >=2) { printf("INFO: [down] for server %s PULL_ACK received in .. ms\n", servername ); } //TODO
+					}
+				} else { /* out-of-sync token */
+					printf("INFO: [down] for server %s, received out-of-sync ACK\n",servername);
+				}
+			//	continue;
+			}
+			
+			//TODO: This might generate to much logging data. The reporting should be reevaluated and an option -q should be added.
+			/* the datagram is a PULL_RESP */
+			buff_down[msg_len] = 0; /* add string terminator, just to be safe */
+			//printf("Received buff %s\n", (char *) buff_down);
+			//printf("INFO: [down] for server %s PULL_RESP received :)\n",servername); /* very verbose */
+			//printf("JSON down: %s\n", (char *)(buff_down + 4)); /* DEBUG: display JSON payload */
+
+			//Now send the packet to the node
+  			//char LoraBuffer[64]; 						//buffer to hold packet to send to LoRa node
+  			uint8_t * data = buff_down + 4;
+ 			uint8_t  ident = buff_down[3];
+			int packetSize = sizeof(buff_down);
+			uint16_t  token = buff_down[2]*256 + buff_down[1];
+			byte CE=0; // For now hardcode to 1st RFM; need to update and use the corresponding freq or random
+			struct timeval now;
+  
+  			// now parse the message type from the server (if any)
+  			switch (ident) {
+			case PKT_PUSH_DATA: // 0x00 UP
+			if (debug >=1) {
+				printf("PKT_PUSH_DATA:: size %i\n", packetSize);
+				printf(" From TBD\n");
+				printf(", port TBD\n");
+				printf(", data: ");
+				for (int i=0; i<packetSize; i++) {
+					printf("%i",buff_down[i]);
+					printf(":");
+				}
+				printf("\n");
+			}
+			break;
+			case PKT_PUSH_ACK:	// 0x01 DOWN
+			if (debug >= 1) {
+				printf("PKT_PUSH_ACK:: size %i\n", packetSize);
+				printf(" From TBD\n");
+				printf(", port TBD\n");
+				printf(", token: %i\n", token);
+			}
+			break;
+			case PKT_PULL_DATA:	// 0x02 UP
+				printf(" Pull Data\n");
+			break;
+			case PKT_PULL_RESP:	// 0x03 DOWN
+				//lastTmst = micros();					// Store the tmst this package was received TODO
+				// Send to the LoRa Node first (timing) and then do messaging
+				if (sendPacket(data, sizeof(data)-4, CE) < 0) {
+				printf("Error sending packet\n");
+			}
+		
+			// Now respond with an PKT_PULL_ACK; 0x04 UP
+			buff_up[0]=buff_down[0];
+			buff_up[1]=buff_down[1];
+			buff_up[2]=buff_down[2];
+			buff_up[3]=PKT_PULL_ACK;
+			buff_up[4]=0;
+			
+			// Only send the PKT_PULL_ACK to the UDP socket that just sent the data!!!
+			//SendUdp((char*) buff_up, 4);
+			send(sock_down[ic], (void *)buff_req, sizeof buff_req, 0);
+				if (debug>=2) {
+					gettimeofday(&now, NULL);
+					printf("PKT_PULL_ACK:: tmst=%i\n", (uint32_t)(now.tv_sec * 1000000 + now.tv_usec));
+				}
+			
+				if (debug >=1) {
+					//printf("PKT_PULL_RESP:: size %i", packetSize);
+					printf("PKT_PULL_RESP:: ");
+					printf(" From server %s.\n", servername);
+					//TODO: printf(", port TBD");	
+					//printf(", data: TBD\n");
+					//data = buff_down + 4;
+					//data[packetSize] = 0;
+					//print((char *)data);
+					//println("..."));
+				}
+				cp_nb_pull++;
+			break;
+			case PKT_PULL_ACK:	// 0x04 DOWN; the server sends a PULL_ACK to confirm PULL_DATA receipt
+				if (debug >= 2) {
+					printf("PKT_PULL_ACK:: size %i\n", packetSize);
+					printf(" From SERVER %s", servername);
+					printf(", port TBD");	
+				//TODO: printf(", data: ");
+				//for (int i=0; i<packetSize; i++) {
+				//	printf("%i", buff_down[i]);
+				//	printf(":");
+				//}
+				printf("\n");
+			}
+			break;
+			default:
+				printf(", ERROR ident not recognized: %i\n", ident);
+			break;
+  			}
+		}
+	}
+	printf("\nINFO: End of downstream thread for server  %s.\n",servername);
 }
