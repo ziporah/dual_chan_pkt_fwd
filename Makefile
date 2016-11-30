@@ -3,18 +3,24 @@
 
 CC = g++
 CFLAGS = -std=c++11 -c -Wall -I include/
-LIBS = -lwiringPi
+LIBS = -lwiringPi -lpthread 
 
 all: dual_chan_pkt_fwd
 
-dual_chan_pkt_fwd: base64.o dual_chan_pkt_fwd.o
-	$(CC) dual_chan_pkt_fwd.o base64.o $(LIBS) -o dual_chan_pkt_fwd
+dual_chan_pkt_fwd: base64.o parson.o LoraModem.o dual_chan_pkt_fwd.o
+	$(CC) dual_chan_pkt_fwd.o parson.o base64.o LoraModem.o $(LIBS) -o dual_chan_pkt_fwd
 
-dual_chan_pkt_fwd.o: dual_chan_pkt_fwd.cpp
-	$(CC) $(CFLAGS) dual_chan_pkt_fwd.cpp
+dual_chan_pkt_fwd.o: dual_chan_pkt_fwd.cpp 
+	$(CC) $(CFLAGS) dual_chan_pkt_fwd.cpp 
 
 base64.o: base64.c
 	$(CC) $(CFLAGS) base64.c
+
+parson.o: parson.c parson.h
+	$(CC) $(CFLAGS) parson.c
+
+LoraModem.o: LoraModem.c LoraModem.h
+	$(CC) $(CFLAGS) LoraModem.c
 
 clean:
 	rm *.o dual_chan_pkt_fwd
