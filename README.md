@@ -1,4 +1,4 @@
-Dual Channel LoRaWAN Gateway
+Dual Channel LoRaWAN Gateway (Up and Downlink)
 ==============================
 This repository contains a proof-of-concept implementation of a dual
 channel LoRaWAN gateway.
@@ -18,8 +18,10 @@ Was forked by @jlesech https://github.com/tftelkamp/single_chan_pkt_fwd to add j
 then forked by @hallard https://github.com/hallard/single_chan_pkt_fwd 
 then forked by @bokse001 https://github.com/bokse001/dual_chan_pkt_fwd to add dual channel support, 
     configurable network interface, Downlink and uputronics Raspberry Pi+ LoRa(TM) Expansion Board
+
 It contains code from both the ESP-1ch-Gateway-v3.0 by Maarten Westenberg https://github.com/things4u/ESP-1ch-Gateway-v3.0
 and TheThingsNetwork/packet_forwarder https://github.com/TheThingsNetwork/packet_forwarder
+
 [WARNING] This is bleeding edge development so do not expect clean coding, but it has been working for a while now. Lots of things
 still to do.
 
@@ -31,6 +33,7 @@ Added new Features
 - renamed main.cpp to dual_chan_pkt_fwd.cpp
 - added dual_chan_pkt_fwd.service for systemd (debian jessie minimal) start
 - added `make install` and `make uninstall` into Makefile to install service
+
 Added by HBM:
 - added support for uputronics Raspberry Pi+ LoRa(TM) Expansion Board
 - added control for On board Led's if any (uputronics board CE0 and CE1 activity, Internet and Lan sensing leds)
