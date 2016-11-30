@@ -3,8 +3,8 @@ Dual Channel LoRaWAN Gateway
 This repository contains a proof-of-concept implementation of a dual
 channel LoRaWAN gateway.
 
-It has been tested on the Raspberry Pi platform, using a Semtech SX1272
-transceiver (HopeRF RFM92W), and SX1276 (HopeRF RFM95W).
+It has been tested on the Raspberry Pi platform, using a Semtech SX1276 (2x HopeRF RFM95W uputronics hat).
+(other configurations and the SX1272 not tested, but should be able to make working)
 
 The code is for testing and development purposes only, and is not meant
 for production usage.
@@ -17,20 +17,28 @@ Maintainer: Thomas Telkamp <thomas@telkamp.eu>
 Was forked by @jlesech https://github.com/tftelkamp/single_chan_pkt_fwd to add json configuration file    
 then forked by @hallard https://github.com/hallard/single_chan_pkt_fwd 
 then forked by @bokse001 https://github.com/bokse001/dual_chan_pkt_fwd to add dual channel support, 
-    configurable network interface and uputronics Raspberry Pi+ LoRa(TM) Expansion Board
+    configurable network interface, Downlink and uputronics Raspberry Pi+ LoRa(TM) Expansion Board
+It contains code from both the ESP-1ch-Gateway-v3.0 by Maarten Westenberg https://github.com/things4u/ESP-1ch-Gateway-v3.0
+and TheThingsNetwork/packet_forwarder https://github.com/TheThingsNetwork/packet_forwarder
+[WARNING] This is bleeding edge development so do not expect clean coding, but it has been working for a while now. Lots of things
+still to do.
 
 Added new Features
 ------------------
 
-- Added support for [Dragino Lora HAT][2] and [LoRasPi][1] (more to come) and uputronics Raspberry Pi+ LoRa(TM) Expansion Board
 - pin definition are in config file
 - Removed some configuration hard coded in source file and put them into global_conf.json
 - renamed main.cpp to dual_chan_pkt_fwd.cpp
 - added dual_chan_pkt_fwd.service for systemd (debian jessie minimal) start
 - added `make install` and `make uninstall` into Makefile to install service
+Added by HBM:
+- added support for uputronics Raspberry Pi+ LoRa(TM) Expansion Board
 - added control for On board Led's if any (uputronics board CE0 and CE1 activity, Internet and Lan sensing leds)
 - added configuration of the network interface (eth0/wlan0) and sensing network interface connectivity
-- added a counter for packets received since last start
+- added a counter for packets received and sent since last start
+- added Downlink support in a separate thread
+- moved LoRA functions to separate file
+- moved compile time variables to header file
 
 Raspberry PI pin mapping is as follow and pin number in file `global_conf.json` are WiringPi pin number (wPi colunm)
 
@@ -142,12 +150,6 @@ running daemon on Raspberry PI with uputronics Raspberry Pi+ LoRa(TM) Expansion 
 <img src="https://github.com/bokse001/dual_chan_pkt_fwd/blob/master/images/dual-channel-gw-ttn.jpg" alt="Dual Channel GW TTN">
 
 
-running daemon on Raspberry PI with LoRasPI shield    
-
-<img src="https://raw.githubusercontent.com/hallard/LoRasPI/master/images/LoRasPI-on-Pi.jpg" alt="LoRasPI plugged on PI">
-
-
-
 **Original README.md below**
 
 Features
@@ -201,3 +203,4 @@ The source files in this repository are made available under the Eclipse Public 
 
 base64 implementation, that has been copied from the Semtech Packet Forwarder;
 RapidJSON, licensed under the MIT License.
+parson, copied from http://kgabis.github.com/parson/ 
