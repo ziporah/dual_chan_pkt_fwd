@@ -117,7 +117,8 @@ Install dependencies as indicated in original README.md below then
 
 ```shell
 cd /home/pi
-git clone https://github.com/bokse001/dual_chan_pkt_fwd
+git clone -b dual_chan_pkt_fwd_up_down https://github.com/bokse001/dual_chan_pkt_fwd
+cd dual_chan_pkt_fwd
 make
 sudo make install
 ````
