@@ -173,9 +173,10 @@ downstream messages (tx)
 Dependencies
 ------------
 
-SPI needs to be enabled on the Raspberry Pi (use raspi-config)
-WiringPi: a GPIO access library written in C for the BCM2835 used in the Raspberry Pi. sudo apt-get install wiringpi see http://wiringpi.com
-Run packet forwarder as root
+-	SPI needs to be enabled in the Raspberry Pi configuration menu (to start up use CLI command: raspi-config) 
+-	Install WiringPi  (GPIO access library – refer to: http://wiringpi.com/ ): sudo apt-get install wiringpi 
+-	Run packet forwarder as root (sudo)
+
 
 Connections
 -----------
