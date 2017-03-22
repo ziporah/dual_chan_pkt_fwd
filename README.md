@@ -25,7 +25,7 @@ and TheThingsNetwork/packet_forwarder https://github.com/TheThingsNetwork/packet
 [WARNING] This is bleeding edge development so do not expect clean coding, but it has been working for a while now. Lots of things
 still to do.
 
-Also have a look at my log where i write something about TTN, LoRa and domoticz from time to time: https://hansboksem.wordpress.com/
+Also have a look at my log where i write my experiences on TTN, LoRa and domoticz from time to time: https://hansboksem.wordpress.com/
 
 Added new Features
 ------------------
