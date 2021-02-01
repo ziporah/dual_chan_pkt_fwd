@@ -549,7 +549,7 @@ void initLoraModem(byte CE)
             sx1272 = false;
         } else {
            printf("Transceiver version 0x%02X\n", version);
-           Die("Unrecognized transceiver");
+           // Die("Unrecognized transceiver");
         }
     }
         opmodeLora(CE);												// set register 0x01 to 0x80
